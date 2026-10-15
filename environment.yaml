@@ -1,0 +1,8 @@
+name: glue_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - boto3=1.34
+  - pyyaml=6.0

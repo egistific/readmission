@@ -1,0 +1,73 @@
+aws:
+  region: "us-east-1"
+  
+catalog:
+  database_name: "synthea-omop"  
+  bucket: "readmission-bucket"
+  glue_role_arn: "arn:aws:iam::123456789012:role/MyGlueRole"
+  csv_name: "csv"
+  parquet_name: "parquet"
+
+scripts_name: "scripts"
+features_name: "features"
+results_name: "results"
+
+table_names:
+  - "person"
+  - "visit_occurrence"
+  - "condition_occurrence"
+  - "drug_exposure"
+  - "procedure_occurrence"
+
+exclude_suffixes:
+  - "_idx"
+  - "_date"
+  - "_datetime"
+  - "value_as_number"
+
+concept_ids:
+  inpatient_visit_concept_id: 9201
+  emergency_visit_concept_id: 9203
+
+admission_gap: 30
+er_lead_in_threshold: 1
+
+count_vectorizer:
+  binary: True
+  min_df: 50
+  vocab_size: 200
+
+cross_validation:
+  num_folds: 3
+  parallelism: 1
+
+xgboost:
+  num_workers: 1
+  n_estimators: 500
+  min_child_weight: 5
+  subsample: 0.8
+  colsample_bytree: 0.8
+  reg_lambda: 5
+  early_stopping_rounds: 30
+  param_grid:
+    max_depth:
+      - 3
+      - 5
+      - 7
+    learning_rate:
+      - 0.01
+      - 0.1
+
+evaluator:
+  metric: "areaUnderROC"
+
+train_fraction: 0.8
+seed: 42
+
+job:
+  glue_version: "5.1"
+  worker_type: "G.1X"
+  num_workers: 2
+  timeout: 30
+  no_wait: "store_true"
+  dry_run: "store_true"

@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Secrets and local config
+.env
+config/config_org.yaml
+
+# OS / editor files
+.DS_Store
+.vscode/
+
+# Local outputs
+archive/
+data/
