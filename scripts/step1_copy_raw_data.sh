@@ -1,19 +1,24 @@
 #!/bin/bash
 set -o pipefail
 
-CONFIG=../config/config.yaml
-[ -f "$CONFIG" ] || { echo "Config file not found: $CONFIG (run from scripts/)" >&2; exit 1; }
+YAML_FILE=../config/config.yaml
 
-cfg() { python3 -c "import sys, yaml; d = yaml.safe_load(open(sys.argv[1])); print($1)" "$CONFIG"; }
+eval "$(python3 -c "
+import yaml
+import shlex
 
-BUCKET=$(cfg "d['catalog']['bucket']")     || exit 1
-CSV_NAME=$(cfg "d['catalog']['csv_name']") || exit 1
-readarray -t TABLES < <(cfg "'\n'.join(d['table_names'])")
+with open('$YAML_FILE', 'r') as f:
+    config = yaml.safe_load(f)
 
-[ -n "$BUCKET" ] && [ ${#TABLES[@]} -gt 0 ] || { echo "Empty bucket or table list in $CONFIG" >&2; exit 1; }
+print(f'BUCKET=\"{config[\"catalog\"][\"bucket\"]}\"')
+print(f'CSV_NAME=\"{config[\"catalog\"][\"csv_name\"]}\"')
 
-for t in "${TABLES[@]}"; do
-  echo "decompressing: $t"
+tables = ' '.join(shlex.quote(str(t)) for t in config['table_names'])
+print(f'TABLE_NAMES=({tables})')
+")"
+
+for t in "${TABLE_NAMES[@]}"; do
+  echo "Decompressing: $t"
 
   if aws s3 cp --no-sign-request "s3://synthea-omop/synthea100k/${t}.csv.lzo" - \
       | lzop -d \
