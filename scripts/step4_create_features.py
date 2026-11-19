@@ -33,7 +33,7 @@ def get_inpatient(visit_occurrence, inpatient_visit_concept_id, emergency_visit_
         .dropDuplicates(["person_id", "visit_occurrence_id", "visit_start_datetime", "visit_end_datetime"])
         .filter(F.col("visit_concept_id") == inpatient_visit_concept_id)
         .select("person_id", "visit_occurrence_id", "visit_concept_id", "visit_start_datetime", "visit_end_datetime")
-        .orderBy(["person_id", "visit_start_datetime", "visit_end_datetime"])
+        # .orderBy(["person_id", "visit_start_datetime", "visit_end_datetime"])
         .withColumn("max_prior_visit_end_datetime", F.max("visit_end_datetime").over(w_prior))
         .withColumn("gap_days", days_between("visit_start_datetime", "max_prior_visit_end_datetime"))
         .withColumn("is_new_admission", F.when((F.col("gap_days") > 0) | (F.col("gap_days").isNull()), F.lit(1)).otherwise(F.lit(0)))
@@ -51,7 +51,7 @@ def get_inpatient(visit_occurrence, inpatient_visit_concept_id, emergency_visit_
         .dropDuplicates(["person_id", "visit_occurrence_id", "visit_start_datetime", "visit_end_datetime"])
         .filter(F.col("visit_concept_id") == emergency_visit_concept_id)
         .select("person_id", "visit_start_datetime", "visit_end_datetime")
-        .orderBy(["person_id", "visit_start_datetime", "visit_end_datetime"])
+        # .orderBy(["person_id", "visit_start_datetime", "visit_end_datetime"])
     )
 
 
@@ -63,7 +63,7 @@ def get_inpatient(visit_occurrence, inpatient_visit_concept_id, emergency_visit_
         .join(er, "person_id", "inner")
         .withColumn("diff_start_times_days", days_between("inpatient_visit_start_datetime", "visit_start_datetime"))
         .withColumn("er_to_inpatient_gap_days", days_between("inpatient_visit_start_datetime", "visit_end_datetime"))
-        .withColumn("er_lead_in", (F.col("diff_start_times_days") > 0) & (F.col("er_to_inpatient_gap_days") >= 0) & (F.col("er_to_inpatient_gap_days") <= er_lead_in_threshold))
+        .withColumn("er_lead_in", (F.col("diff_start_times_days") > 0) & (F.col("er_to_inpatient_gap_days") <= er_lead_in_threshold))
         .filter(F.col("er_lead_in"))
         .groupBy(["person_id", "admission_group"])
         .agg(F.min("visit_start_datetime").alias("er_start_datetime"))
@@ -98,53 +98,83 @@ def get_person(person, inpatient):
     return person_merged
 
 def get_condition(condition_occurrence, inpatient):
-    condition_occurrence = condition_occurrence.withColumn("new_condition_concept_id", F.coalesce(F.when(F.col("condition_concept_id")==0, None).otherwise(F.col("condition_concept_id")), F.col("condition_source_concept_id")))
+    condition_occurrence = condition_occurrence.withColumn("new_condition_concept_id", F.when(F.col("condition_concept_id") != 0, F.col("condition_concept_id")))   # null for 0 -> ignored by collect_set
+
     condition_merged = (
         inpatient
         .join(condition_occurrence, "person_id", "inner")
-        .filter(F.col("inpatient_visit_end_datetime") >= F.col("condition_start_datetime"))
+        # .filter(F.col("inpatient_visit_end_datetime") >= F.col("condition_start_datetime"))
     )
     inpatient_condition = (
         condition_merged
+        .filter(F.col("inpatient_visit_end_datetime") >= F.col("condition_start_datetime"))
         .groupBy(["person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"])
         .agg(F.countDistinct(F.col("new_condition_concept_id")).alias("number_of_distinct_conditions"), F.array_sort(F.collect_set(F.col("new_condition_concept_id").cast("string"))).alias("distinct_conditions_set"))
-        .orderBy("person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime")
+        # .orderBy("person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime")
     )
-    return inpatient_condition
+    one_year_before_end = F.col("inpatient_visit_end_datetime") - F.expr("INTERVAL 1 YEAR")
+    inpatient_condition_1year = (
+        condition_merged
+        .filter(F.col("condition_start_datetime").between(one_year_before_end, F.col("inpatient_visit_end_datetime")))
+        .groupBy(["person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"])
+        .agg(F.countDistinct(F.col("new_condition_concept_id")).alias("number_of_distinct_conditions_1year"), F.array_sort(F.collect_set(F.col("new_condition_concept_id").cast("string"))).alias("distinct_conditions_1year_set"))
+        # .orderBy("person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime")
+    )
+
+    return inpatient_condition, inpatient_condition_1year
 
 def get_drug(drug_exposure, inpatient):
-    drug_exposure = drug_exposure.withColumn("new_drug_concept_id", F.coalesce(F.when(F.col("drug_concept_id")==0, None).otherwise(F.col("drug_concept_id")), F.col("drug_source_concept_id")))
+    drug_exposure = drug_exposure.withColumn("new_drug_concept_id", F.when(F.col("drug_concept_id")!= 0, F.col("drug_concept_id")))
     drug_merged = (
         inpatient
         .join(drug_exposure, "person_id", "inner") 
-        .filter(F.col("inpatient_visit_end_datetime") >= F.col("drug_exposure_start_datetime"))
+        # .filter(F.col("inpatient_visit_end_datetime") >= F.col("drug_exposure_start_datetime"))
     )
     inpatient_drug = (
-        drug_merged.groupBy(["person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"])
+        drug_merged
+        .filter(F.col("inpatient_visit_end_datetime") >= F.col("drug_exposure_start_datetime"))
+        .groupBy(["person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"])
         .agg(F.countDistinct("new_drug_concept_id").alias("number_of_distinct_drugs"), F.array_sort(F.collect_set(F.col("new_drug_concept_id").cast("string"))).alias("distinct_drugs_set"))
-        .orderBy("person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime")
+        # .orderBy("person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime")
     )
-    return inpatient_drug
+    one_year_before_end = F.col("inpatient_visit_end_datetime") - F.expr("INTERVAL 1 YEAR")
+    inpatient_drug_1year = (
+        drug_merged
+        .filter(F.col("drug_exposure_start_datetime").between(one_year_before_end, F.col("inpatient_visit_end_datetime")))
+        .groupBy(["person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"])
+        .agg(F.countDistinct("new_drug_concept_id").alias("number_of_distinct_drugs_1year"), F.array_sort(F.collect_set(F.col("new_drug_concept_id").cast("string"))).alias("distinct_drugs_1year_set"))
+        # .orderBy("person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime")
+    )
+    return inpatient_drug, inpatient_drug_1year
 
 def get_procedure(procedure_occurrence, inpatient):
-    procedure_occurrence = procedure_occurrence.withColumn("new_procedure_concept_id", F.coalesce(F.when(F.col("procedure_concept_id")==0, None).otherwise(F.col("procedure_concept_id")), F.col("procedure_source_concept_id")))
+    procedure_occurrence = procedure_occurrence.withColumn("new_procedure_concept_id", F.when(F.col("procedure_concept_id") != 0, F.col("procedure_concept_id")))
     procedure_merged = (
         inpatient
         .join(procedure_occurrence, "person_id", "inner")
-        .filter(F.col("inpatient_visit_end_datetime") >= F.col("procedure_datetime"))
+        # .filter(F.col("inpatient_visit_end_datetime") >= F.col("procedure_datetime"))
     )
     inpatient_procedure = (
         procedure_merged
+        .filter(F.col("inpatient_visit_end_datetime") >= F.col("procedure_datetime"))
         .groupBy(["person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"])
         .agg(F.countDistinct(F.col("new_procedure_concept_id")).alias("number_of_distinct_procedures"), F.array_sort(F.collect_set(F.col("new_procedure_concept_id").cast("string"))).alias("distinct_procedures_set"))
-        .orderBy("person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime")
+        # .orderBy("person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime")
     )
-    return inpatient_procedure
+    one_year_before_end = F.col("inpatient_visit_end_datetime") - F.expr("INTERVAL 1 YEAR")
+    inpatient_procedure_1year = (
+        procedure_merged
+        .filter(F.col("procedure_datetime").between(one_year_before_end, F.col("inpatient_visit_end_datetime")))
+        .groupBy(["person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"])
+        .agg(F.countDistinct(F.col("new_procedure_concept_id")).alias("number_of_distinct_procedures_1year"), F.array_sort(F.collect_set(F.col("new_procedure_concept_id").cast("string"))).alias("distinct_procedures_1year_set"))
+        # .orderBy("person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime")
+    )
+    return inpatient_procedure, inpatient_procedure_1year
 
 def get_feature_table(df, fillna_cols, vec_cols):
     df = df.fillna(0, subset=[c for c in fillna_cols])
     for c in vec_cols:
-        df = df.withColumn(c, F.coalesce(F.col(c), F.array().cast(f"array<{'string'}>")))
+        df = df.withColumn(c, F.coalesce(F.col(c), F.array().cast(f"array<string>")))
     # any_null = reduce(lambda a, b: a | b, [F.col(c).isNull() for c in df.columns])
     # df.filter(any_null).show()
     return df
@@ -152,17 +182,20 @@ def get_feature_table(df, fillna_cols, vec_cols):
 def combine_dataframes(visit_occurrence, person, condition_occurrence, drug_exposure, procedure_occurrence, inpatient_visit_concept_id, emergency_visit_concept_id, admission_gap, er_lead_in_threshold):
     inpatient= get_inpatient(visit_occurrence, inpatient_visit_concept_id, emergency_visit_concept_id, admission_gap, er_lead_in_threshold)
     inpatient_person = get_person(person, inpatient)
-    inpatient_condition = get_condition(condition_occurrence, inpatient)
-    inpatient_drug = get_drug(drug_exposure, inpatient)
-    inpatient_procedure = get_procedure(procedure_occurrence, inpatient)
+    inpatient_condition, inpatient_condition_1year = get_condition(condition_occurrence, inpatient)
+    inpatient_drug, inpatient_drug_1year = get_drug(drug_exposure, inpatient)
+    inpatient_procedure, inpatient_procedure_1year = get_procedure(procedure_occurrence, inpatient)
 
     df = (
         inpatient
         .join(inpatient_person, ["person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"], "left")
         .join(inpatient_condition, ["person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"], "left")
+        .join(inpatient_condition_1year, ["person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"], "left")
         .join(inpatient_drug, ["person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"], "left")
+        .join(inpatient_drug_1year, ["person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"], "left")
         .join(inpatient_procedure, ["person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"], "left")
-        .orderBy("person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime")
+        .join(inpatient_procedure_1year, ["person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"], "left")
+        # .orderBy("person_id", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime")
         .dropDuplicates()
         )
     return df
@@ -195,8 +228,11 @@ def main():
     ADMISSION_GAP = config["admission_gap"]
     ER_LEAD_IN_THRESHOLD = config["er_lead_in_threshold"]
 
-    vec_cols = ["distinct_conditions_set", "distinct_drugs_set", "distinct_procedures_set"]
-    fillna_cols = ["prior_admission_within_30_days", "next_admission_within_30_days", "number_of_distinct_conditions", "number_of_distinct_drugs", "number_of_distinct_procedures"]
+    vec_cols = ["distinct_conditions_set", "distinct_conditions_1year_set", "distinct_drugs_set", "distinct_drugs_1year_set", 
+                "distinct_procedures_set", "distinct_procedures_1year_set"]
+    fillna_cols = ["prior_admission_within_30_days", "next_admission_within_30_days", "number_of_distinct_conditions", 
+                   "number_of_distinct_conditions_1year", "number_of_distinct_drugs", "number_of_distinct_drugs_1year", 
+                   "number_of_distinct_procedures", "number_of_distinct_procedures_1year"]
 
     visit_schema = StructType([
         StructField("visit_occurrence_id", IntegerType(), True),
@@ -301,11 +337,11 @@ def main():
         StructField("modifier_source_value", StringType(), True),
     ])
 
-    visit_occurrence = spark.read.parquet(f"{INPUT_PREFIX}/visit_occurrence/", header=True)
-    person = spark.read.parquet(f"{INPUT_PREFIX}/person/", header=True)
-    condition_occurrence = spark.read.parquet(f"{INPUT_PREFIX}/condition_occurrence/", header=True)
-    drug_exposure = spark.read.parquet(f"{INPUT_PREFIX}/drug_exposure/", header=True)
-    procedure_occurrence = spark.read.parquet(f"{INPUT_PREFIX}/procedure_occurrence/", header=True)
+    visit_occurrence = spark.read.parquet(f"{INPUT_PREFIX}/visit_occurrence/")
+    person = spark.read.parquet(f"{INPUT_PREFIX}/person/")
+    condition_occurrence = spark.read.parquet(f"{INPUT_PREFIX}/condition_occurrence/")
+    drug_exposure = spark.read.parquet(f"{INPUT_PREFIX}/drug_exposure/")
+    procedure_occurrence = spark.read.parquet(f"{INPUT_PREFIX}/procedure_occurrence/")
     df = combine_dataframes(visit_occurrence, person, condition_occurrence, drug_exposure, procedure_occurrence, 
                             INPATIENT_VISIT_CONCEPT_ID, EMERGENCY_VISIT_CONCEPT_ID, ADMISSION_GAP, ER_LEAD_IN_THRESHOLD)
     feature_table = get_feature_table(df, fillna_cols, vec_cols)

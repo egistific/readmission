@@ -11,7 +11,7 @@ from functools import reduce
 from pyspark.context import SparkContext
 from pyspark.sql import functions as F
 from pyspark.ml import Pipeline
-from pyspark.ml.feature import StringIndexer, OneHotEncoder, CountVectorizer, VectorAssembler
+from pyspark.ml.feature import StringIndexer, OneHotEncoder, CountVectorizer, VectorAssembler, CountVectorizerModel
 from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
 from pyspark.ml.evaluation import BinaryClassificationEvaluator
 
@@ -54,6 +54,42 @@ def train_test_split(df, group, label, train_fraction, seed):
     df_test = df.join(test_groups, group, "inner")
     return df_train, df_test
 
+def get_feature_names(pipeline_model, df, features_col="features"):
+    attrs_by_type = pipeline_model.transform(df).schema[features_col].metadata["ml_attr"]["attrs"] # dictionary of lists
+    print(attrs_by_type.values())
+    attrs = []
+    for group in attrs_by_type.values():
+        for a in group:
+            attrs.append(a)
+    attrs = sorted(attrs, key=lambda a: a["idx"])
+    print(attrs)
+    vocabs = {s.getOutputCol(): s for s in pipeline_model.stages if isinstance(s, CountVectorizerModel)}
+    print(vocabs)
+
+    names = []
+    for attr in attrs:
+        col, _, index = attr["name"].rpartition("_")
+        if col in vocabs and index.isdigit():
+            cv = vocabs[col]
+            names.append(f"{cv.getInputCol()}={cv.vocabulary[int(index)]}")
+        else:
+            names.append(attr["name"])
+    return names
+
+def get_feature_importance(model, feature_names):
+    importance_types = ["gain", "total_gain", "weight", "cover"]
+
+    booster = model.stages[-1].get_booster().copy()
+    booster.feature_names = feature_names
+    scores = {t: booster.get_score(importance_type=t) for t in importance_types}
+    df_imp = pd.DataFrame(scores, index=feature_names)
+    df_imp = df_imp.fillna(0)
+    df_imp["total_gain_fraction"] = df_imp["total_gain"] / df_imp["total_gain"].sum()
+    df_imp = df_imp.sort_values(["total_gain_fraction"], ascending=False)
+    # give index column a label and change index to regular column
+    df_imp = df_imp.rename_axis("features").reset_index()
+    return df_imp
+
 def main():
     args = getResolvedOptions(sys.argv, ["CONFIG_PATH", "JOB_NAME", "INPUT_PREFIX", "OUTPUT_PREFIX"])
 
@@ -75,7 +111,7 @@ def main():
     OUTPUT_PREFIX = args["OUTPUT_PREFIX"]
     
     cat_cols = ["gender_concept_id", "race_concept_id", "ethnicity_concept_id"]
-    vec_cols = ["distinct_conditions_set", "distinct_drugs_set", "distinct_procedures_set"]
+    vec_cols = ["distinct_conditions_set", "distinct_conditions_1year_set", "distinct_drugs_set", "distinct_drugs_1year_set", "distinct_procedures_set", "distinct_procedures_1year_set"]
     drop_cols = ["person_id", "admission_group", "inpatient_visit_earliest_start_datetime", "inpatient_visit_end_datetime"]
     label = "next_admission_within_30_days"
     group = "person_id"
@@ -156,6 +192,12 @@ def main():
 
     df_best = spark.createDataFrame([{"metric": config["evaluator"]["metric"], "metric_average": float(metric_average), "best_params": json.dumps(best_params)}])
     df_best.write.mode("overwrite").json(f"{OUTPUT_PREFIX}/best_model_metrics")
+
+    best_model = cv_model.bestModel
+    feature_names = get_feature_names(best_model, df_test)
+    df_imp = get_feature_importance(best_model, feature_names)
+    spark.createDataFrame(df_imp).coalesce(1).write.csv(f"{OUTPUT_PREFIX}/feature_importance", mode="overwrite", header=True)
+
     train_preds = cv_model.bestModel.transform(df_train)
     test_preds = cv_model.bestModel.transform(df_test)
 

@@ -14,3 +14,4 @@ config/config_org.yaml
 # Local outputs
 archive/
 data/
+predictions/
