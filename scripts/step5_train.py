@@ -52,6 +52,7 @@ def train_test_split(df, group, label, train_fraction, seed):
     test_groups = reduce(merge_dfs, test_groups_list)
     df_train = df.join(train_groups, group, "inner")
     df_test = df.join(test_groups, group, "inner")
+    df_keys.unpersist()
     return df_train, df_test
 
 def get_feature_names(pipeline_model, df, features_col="features"):
@@ -122,7 +123,7 @@ def main():
     df = df.select(group, "admission_group", label, *num_cols, *cat_cols, *vec_cols)
     df_train, df_test = train_test_split(df, group, label, config["train_fraction"], config["seed"])
 
-    df_groups_spark = df_train.select([group, label]).dropDuplicates([group])
+    df_groups_spark = df_train.select([group, label]).dropDuplicates([group, label])
     df_groups_pd = df_groups_spark.toPandas()
     df_groups_pd["fold"] = -1
     sgkf = StratifiedGroupKFold(n_splits=config["cross_validation"]["num_folds"], shuffle=True, random_state=config["seed"])
@@ -139,7 +140,6 @@ def main():
     count_vec = [CountVectorizer(inputCol=c, binary=config["count_vectorizer"]["binary"], minDF=config["count_vectorizer"]["min_df"], 
                                  vocabSize=config["count_vectorizer"]["vocab_size"], outputCol=f"{c}_vec") for c in vec_cols]
 
-    num_cols = [c for c in df.columns if c not in (cat_cols + vec_cols + drop_cols + [label])] 
     assembler = VectorAssembler(
         inputCols=num_cols + [f"{c}_ohe" for c in cat_cols] + [f"{c}_vec" for c in vec_cols],
         outputCol="features",
